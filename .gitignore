@@ -6,3 +6,6 @@ tools/
 
 # Binaries and the generated header from sh tools/tests/run_tests.sh
 build/menu-tests/
+
+# Local agent tooling, not part of the build
+.claude/
