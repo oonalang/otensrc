@@ -344,13 +344,6 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
     screenHeight = (float)g_GlHeight;
     io->DisplaySize = ImVec2((float)g_GlWidth, (float)g_GlHeight);
 
-    // ---- touch -> ImGui, BEFORE NewFrame ----
-    // Feeding input at the end of the draw pass made hover and drag run a
-    // frame behind the widgets and let MouseClicked be computed from stale
-    // positions, which showed up as a window that would not grab drags.
-    // Unity reports touches in its own screen space while io.DisplaySize is
-    // the raw EGL surface, so the position is converted here; after this
-    // ImGui only ever sees GL pixels and every hit-test lines up.
     io->MouseWheel = 0.0f;
     io->MouseWheelH = 0.0f;
     io->MouseDown[0] = false;
@@ -846,8 +839,7 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
             // debounced 500ms auto save, never mid-drag; writes are atomic
             menuState.OnSave = []() { SaveConfiguration("ethnir"); };
 
-            // Touch coordinates are converted into GL space before they reach
-            // ImGui now, so the shell drag must not rescale them a second time.
+            // touch input is already GL-space; do not rescale again
             menuState.DragScaleX = 1.0f;
             menuState.DragScaleY = 1.0f;
 
@@ -918,9 +910,7 @@ void Init_Thread()
     }
     LOGI("libunity.so: %p", m_unity);
     UpdateAllOffset();
-    // Every hard-coded offset below is version-locked to one specific
-    // libunity.so build. Range-check each one so a game update degrades into
-    // disabled features (logged) instead of a SIGSEGV the moment the lib loads.
+    // these offsets are version-locked: invalid ones are skipped, not hooked
     if (IsOffsetInLibrary("libunity.so", 0x5755800))
         MemoryPatch::createWithHex("libunity.so", 0x5755800, "00 00 80 D2 C0 03 5F D6").Modify();
     if (IsOffsetInLibrary("libunity.so", 0x9FEC8AC))

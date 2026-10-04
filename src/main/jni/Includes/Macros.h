@@ -24,10 +24,7 @@ void hook(void *offset, void* ptr, void **orig)
 #endif
 }
 
-// True when `offset` lies inside the file mapping of `libraryName` in this
-// process. Hooking a stale offset from a different game build points the inline
-// hook at unmapped memory and takes the whole game down with SIGSEGV, so every
-// hard-coded offset is range-checked first and skipped (logged) when invalid.
+// A stale offset would be hooked into unmapped memory (SIGSEGV): skip + log instead.
 static inline bool IsOffsetInLibrary(const char *libraryName, uintptr_t offset)
 {
     FILE *fp = fopen("/proc/self/maps", "rt");
@@ -49,7 +46,6 @@ static inline bool IsOffsetInLibrary(const char *libraryName, uintptr_t offset)
 
 #define HOOK(offset, ptr, orig) hook((void *)getAbsoluteAddress(targetLibName, string2Offset(OBFUSCATE(offset))), (void *)ptr, (void **)&orig)
 
-// resolves the hook target only when the offset is inside the lib's mapping
 #define SAFE_HOOK_TARGET(lib, offset) \
     (IsOffsetInLibrary(OBFUSCATE(lib), string2Offset(OBFUSCATE(offset))) \
         ? (void *)getAbsoluteAddress(OBFUSCATE(lib), string2Offset(OBFUSCATE(offset))) \
