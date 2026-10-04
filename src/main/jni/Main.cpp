@@ -343,6 +343,45 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
     screenWidth = (float)g_GlWidth;
     screenHeight = (float)g_GlHeight;
     io->DisplaySize = ImVec2((float)g_GlWidth, (float)g_GlHeight);
+
+    // ---- touch -> ImGui, BEFORE NewFrame ----
+    // Feeding input at the end of the draw pass made hover and drag run a
+    // frame behind the widgets and let MouseClicked be computed from stale
+    // positions, which showed up as a window that would not grab drags.
+    // Unity reports touches in its own screen space while io.DisplaySize is
+    // the raw EGL surface, so the position is converted here; after this
+    // ImGui only ever sees GL pixels and every hit-test lines up.
+    io->MouseWheel = 0.0f;
+    io->MouseWheelH = 0.0f;
+    io->MouseDown[0] = false;
+    if (m_unity != 0 && Config.ImGuiMenu.thiz != 0)
+    {
+        const int uniW = get_width(), uniH = get_height();
+        const float sx = (uniW > 0) ? (float)g_GlWidth  / (float)uniW : 1.0f;
+        const float sy = (uniH > 0) ? (float)g_GlHeight / (float)uniH : 1.0f;
+        auto Input_get_touchCount = (int (*)())(Class_Input_get_touchCount);
+        auto Input_get_mousePosition = (Vector3(*)(uintptr_t))(Class_Input_get_mousePosition);
+        if (Input_get_touchCount() > 0)
+        {
+            Vector3 touchPos = Input_get_mousePosition(Config.ImGuiMenu.thiz);
+            io->MousePos = ImVec2(touchPos.x * sx, g_GlHeight - touchPos.y * sy);
+            auto Input_GetTouch = (Touch(*)(uintptr_t, int))(Class_Input_GetTouch);
+            switch (Input_GetTouch(Config.ImGuiMenu.thiz, 0).m_Phase)
+            {
+                case TouchPhase::Began:
+                case TouchPhase::Stationary:
+                case TouchPhase::Moved:
+                    io->MouseDown[0] = true;
+                    break;
+                case TouchPhase::Ended:
+                case TouchPhase::Canceled:
+                default:
+                    io->MouseDown[0] = false;
+                    break;
+            }
+        }
+    }
+
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
 
@@ -807,12 +846,10 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
             // debounced 500ms auto save, never mid-drag; writes are atomic
             menuState.OnSave = []() { SaveConfiguration("ethnir"); };
 
-            // Touch positions arrive in the game's own pixel space (Unity's
-            // Screen size), while io.DisplaySize is the raw EGL surface. Where
-            // those disagree a raw MouseDelta moves the window less far than the
-            // finger travels, so feed the shell the measured per-axis ratio.
-            menuState.DragScaleX = g_GlWidth  > 0 ? (float)get_width()  / (float)g_GlWidth  : 1.0f;
-            menuState.DragScaleY = g_GlHeight > 0 ? (float)get_height() / (float)g_GlHeight : 1.0f;
+            // Touch coordinates are converted into GL space before they reach
+            // ImGui now, so the shell drag must not rescale them a second time.
+            menuState.DragScaleX = 1.0f;
+            menuState.DragScaleY = 1.0f;
 
             ethnir::EqRender(menuState);
 
@@ -843,38 +880,6 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
             ImGui::PopStyleVar();
         }
         ImGui::PopStyleVar();
-    }
-
-    auto Input_get_touchCount = (int (*)())(Class_Input_get_touchCount);
-    if (Input_get_touchCount() > 0)
-    {
-        auto Input_GetTouch = (Touch(*)(uintptr_t, int))(Class_Input_GetTouch);
-        auto Input_get_mousePosition = (Vector3(*)(uintptr_t))(Class_Input_get_mousePosition);
-        switch (Input_GetTouch(Config.ImGuiMenu.thiz, 0).m_Phase)
-        {
-            case TouchPhase::Began:
-            case TouchPhase::Stationary:
-                io->MouseDown[0] = true;
-                io->MousePos = ImVec2(Input_get_mousePosition(Config.ImGuiMenu.thiz).x,
-                                     get_height() - Input_get_mousePosition(Config.ImGuiMenu.thiz).y);
-                break;
-            case TouchPhase::Ended:
-            case TouchPhase::Canceled:
-                io->MouseDown[0] = false;
-                break;
-            case TouchPhase::Moved:
-                io->MousePos = ImVec2(Input_get_mousePosition(Config.ImGuiMenu.thiz).x,
-                                     get_height() - Input_get_mousePosition(Config.ImGuiMenu.thiz).y);
-                break;
-            default:
-                break;
-        }
-    }
-    else
-    {
-        io->MouseDown[0] = false;
-        io->MouseWheel = 0.0f;
-        io->MouseWheelH = 0.0f;
     }
 
     ImGui::EndFrame();
@@ -913,21 +918,31 @@ void Init_Thread()
     }
     LOGI("libunity.so: %p", m_unity);
     UpdateAllOffset();
-    MemoryPatch::createWithHex("libunity.so", 0x5755800, "00 00 80 D2 C0 03 5F D6").Modify();
-    MemoryPatch::createWithHex("libunity.so", 0x9FEC8AC, "00 00 80 D2 C0 03 5F D6").Modify();
-    Patches.A1 = MemoryPatch::createWithHex("libunity.so", 0x8D781DC,
-        "1F 20 03 D5 E0 03 13 AA");
-    DobbyHook((void*)getAbsoluteAddress("libunity.so", 0xC9B6F90),
-        (void*)&WeaponFireComponent_Instant_CreateBulletLine,
-        (void**)&oWeaponFireComponent_Instant_CreateBulletLine);
-    DobbyHook((void*)getAbsoluteAddress("libunity.so", 0xC9C33A4),
-        (void*)&WeaponFireComponent_Instant_CreateBulletProjectile,
-        (void**)&oWeaponFireComponent_Instant_CreateBulletProjectile);
+    // Every hard-coded offset below is version-locked to one specific
+    // libunity.so build. Range-check each one so a game update degrades into
+    // disabled features (logged) instead of a SIGSEGV the moment the lib loads.
+    if (IsOffsetInLibrary("libunity.so", 0x5755800))
+        MemoryPatch::createWithHex("libunity.so", 0x5755800, "00 00 80 D2 C0 03 5F D6").Modify();
+    if (IsOffsetInLibrary("libunity.so", 0x9FEC8AC))
+        MemoryPatch::createWithHex("libunity.so", 0x9FEC8AC, "00 00 80 D2 C0 03 5F D6").Modify();
+    if (IsOffsetInLibrary("libunity.so", 0x8D781DC))
+        Patches.A1 = MemoryPatch::createWithHex("libunity.so", 0x8D781DC,
+            "1F 20 03 D5 E0 03 13 AA");
+    if (IsOffsetInLibrary("libunity.so", 0xC9B6F90))
+        DobbyHook((void*)getAbsoluteAddress("libunity.so", 0xC9B6F90),
+            (void*)&WeaponFireComponent_Instant_CreateBulletLine,
+            (void**)&oWeaponFireComponent_Instant_CreateBulletLine);
+    if (IsOffsetInLibrary("libunity.so", 0xC9C33A4))
+        DobbyHook((void*)getAbsoluteAddress("libunity.so", 0xC9C33A4),
+            (void*)&WeaponFireComponent_Instant_CreateBulletProjectile,
+            (void**)&oWeaponFireComponent_Instant_CreateBulletProjectile);
     InitializeAllHooks();
     auto swapBuffers = ((uintptr_t)DobbySymbolResolver(
         OBFUSCATE("libunity.so"), OBFUSCATE("eglSwapBuffers")));
-    KittyMemory::ProtectAddr((void*)swapBuffers, sizeof(swapBuffers),
-        PROT_READ | PROT_WRITE | PROT_EXEC);
+    LOGI("eglSwapBuffers: %p", (void*)swapBuffers);
+    if (swapBuffers)
+        KittyMemory::ProtectAddr((void*)swapBuffers, sizeof(swapBuffers),
+            PROT_READ | PROT_WRITE | PROT_EXEC);
     xhook_enable_debug(0);
     xhook_register(OBFUSCATE(".*libunity\\.so$"),
         OBFUSCATE("eglSwapBuffers"),

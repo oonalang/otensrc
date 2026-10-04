@@ -2,6 +2,10 @@
 #ifndef ANDROID_MOD_MENU_MACROS_H
 #define ANDROID_MOD_MENU_MACROS_H
 
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+
 #if defined(__aarch64__) //Compile for arm64 lib only
 #include <And64InlineHook/And64InlineHook.hpp>
 
@@ -20,14 +24,44 @@ void hook(void *offset, void* ptr, void **orig)
 #endif
 }
 
+// True when `offset` lies inside the file mapping of `libraryName` in this
+// process. Hooking a stale offset from a different game build points the inline
+// hook at unmapped memory and takes the whole game down with SIGSEGV, so every
+// hard-coded offset is range-checked first and skipped (logged) when invalid.
+static inline bool IsOffsetInLibrary(const char *libraryName, uintptr_t offset)
+{
+    FILE *fp = fopen("/proc/self/maps", "rt");
+    if (!fp) return false;
+    char line[512];
+    uintptr_t lo = 0, hi = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (!strstr(line, libraryName)) continue;
+        uintptr_t start = 0, end = 0;
+        if (sscanf(line, "%lx-%lx", &start, &end) == 2) {
+            if (lo == 0 || start < lo) lo = start;
+            if (end > hi) hi = end;
+        }
+    }
+    fclose(fp);
+    if (lo == 0 || hi <= lo) return false;
+    return offset < (hi - lo);
+}
+
 #define HOOK(offset, ptr, orig) hook((void *)getAbsoluteAddress(targetLibName, string2Offset(OBFUSCATE(offset))), (void *)ptr, (void **)&orig)
-#define HOOK_LIB(lib, offset, ptr, orig) hook((void *)getAbsoluteAddress(OBFUSCATE(lib), string2Offset(OBFUSCATE(offset))), (void *)ptr, (void **)&orig)
+
+// resolves the hook target only when the offset is inside the lib's mapping
+#define SAFE_HOOK_TARGET(lib, offset) \
+    (IsOffsetInLibrary(OBFUSCATE(lib), string2Offset(OBFUSCATE(offset))) \
+        ? (void *)getAbsoluteAddress(OBFUSCATE(lib), string2Offset(OBFUSCATE(offset))) \
+        : (LOGE("HOOK skip %s+%s (outside lib mapping)", lib, offset), (void *)NULL))
+
+#define HOOK_LIB(lib, offset, ptr, orig) do { void *__t = SAFE_HOOK_TARGET(lib, offset); if (__t) hook(__t, (void *)ptr, (void **)&orig); } while (0)
 
 
 #define OBFUSCATE_FULL(lib, offset) OBFUSCATE(lib ":" offset)
 
 #define HOOK_NO_ORIG(offset, ptr) hook((void *)getAbsoluteAddress(targetLibName, string2Offset(OBFUSCATE(offset))), (void *)ptr, NULL)
-#define HOOK_LIB_NO_ORIG(lib, offset, ptr) hook((void *)getAbsoluteAddress(OBFUSCATE(lib), string2Offset(OBFUSCATE(offset))), (void *)ptr, NULL)
+#define HOOK_LIB_NO_ORIG(lib, offset, ptr) do { void *__t = SAFE_HOOK_TARGET(lib, offset); if (__t) hook(__t, (void *)ptr, NULL); } while (0)
 
 #define HOOKSYM(sym, ptr, org) hook(dlsym(dlopen(targetLibName, 4), OBFUSCATE(sym)), (void *)ptr, (void **)&org)
 #define HOOKSYM_LIB(lib, sym, ptr, org) hook(dlsym(dlopen(OBFUSCATE(lib), 4), OBFUSCATE(sym)), (void *)ptr, (void **)&org)

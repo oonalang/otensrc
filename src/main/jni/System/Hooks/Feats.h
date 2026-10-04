@@ -355,8 +355,11 @@ inline void InitializeAllHooks() {
     HOOK_LIB("libunity.so", "0x50ED8D4", get_EquipTime, orig_get_EquipTime);
 
     //-- Red Wallhack
-    HOOK_LIB("libunity.so", "0x9677554", get_IsInEM3Eye, orig_IsInEM3Eye); 
-    HOOK_LIB("libunity.so", "0xF0", GetAccDistance, orig_GetAccDistance);
+    HOOK_LIB("libunity.so", "0x9677554", get_IsInEM3Eye, orig_IsInEM3Eye);
+    // 0xF0 is inside the ELF header, not executable code - hooking it corrupts
+    // the ELF header. Re-find the real GetAccDistance offset for your build
+    // before re-enabling:
+    // HOOK_LIB("libunity.so", "0xF0", GetAccDistance, orig_GetAccDistance);
 
     //-- Skip Tutorial
     HOOK_LIB_NO_ORIG("libunity.so", "0x9DE0E58", IsTutorialEnabled);
